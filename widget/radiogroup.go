@@ -121,6 +121,22 @@ func (r *RadioGroup) SetActive(a RadioGroupElement) {
 	}
 }
 
+func (r *RadioGroup) AddElement(a RadioGroupElement) {
+	a.getStateChangedEvent().AddHandler(
+		func(args interface{}) {
+			if !r.listen {
+				return
+			}
+			switch args := args.(type) {
+			case *CheckboxChangedEventArgs:
+				r.SetActive(args.Active)
+			case *ButtonChangedEventArgs:
+				r.SetActive(args.Button)
+			}
+		})
+	r.elements = append(r.elements, a)
+}
+
 func (r *RadioGroup) create() {
 	for _, c := range r.elements {
 		c.getStateChangedEvent().AddHandler(func(args interface{}) {
