@@ -1,4 +1,4 @@
-module github.com/ebitenui/ebitenui
+module github.com/timothy-ch-cheung/ebitenui
 
 go 1.19
 
