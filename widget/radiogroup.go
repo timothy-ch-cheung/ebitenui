@@ -134,6 +134,10 @@ func (r *RadioGroup) AddElement(a RadioGroupElement) {
 				r.SetActive(args.Button)
 			}
 		})
+	switch eletype := a.(type) {
+	case *Button:
+		eletype.ToggleMode = true
+	}
 	r.elements = append(r.elements, a)
 	if len(r.elements) == 1 {
 		r.SetActive(a)
