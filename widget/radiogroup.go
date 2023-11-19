@@ -135,6 +135,9 @@ func (r *RadioGroup) AddElement(a RadioGroupElement) {
 			}
 		})
 	r.elements = append(r.elements, a)
+	if len(r.elements) == 1 {
+		r.SetActive(a)
+	}
 }
 
 func (r *RadioGroup) create() {
