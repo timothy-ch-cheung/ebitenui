@@ -108,7 +108,7 @@ func (tw *Checkbox) SetState(state WidgetState) {
 	}
 }
 
-func (tw *Checkbox) getStateChangedEvent() *event.Event {
+func (tw *Checkbox) GetStateChangedEvent() *event.Event {
 	return tw.StateChangedEvent
 }
 

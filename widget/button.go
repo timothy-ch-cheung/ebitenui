@@ -336,7 +336,7 @@ func (b *Button) SetState(state WidgetState) {
 	}
 }
 
-func (b *Button) getStateChangedEvent() *event.Event {
+func (b *Button) GetStateChangedEvent() *event.Event {
 	return b.StateChangedEvent
 }
 

@@ -14,7 +14,7 @@ const (
 
 type RadioGroupElement interface {
 	SetState(state WidgetState)
-	getStateChangedEvent() *event.Event
+	GetStateChangedEvent() *event.Event
 }
 
 type RadioGroup struct {
@@ -123,7 +123,7 @@ func (r *RadioGroup) SetActive(a RadioGroupElement) {
 
 func (r *RadioGroup) create() {
 	for _, c := range r.elements {
-		c.getStateChangedEvent().AddHandler(func(args interface{}) {
+		c.GetStateChangedEvent().AddHandler(func(args interface{}) {
 			if !r.listen {
 				return
 			}
