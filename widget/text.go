@@ -52,9 +52,10 @@ type TextOptions struct {
 }
 
 type textMeasurements struct {
-	label    string
-	face     font.Face
-	maxWidth float64
+	label         string
+	face          font.Face
+	maxWidth      float64
+	processBBCode bool
 
 	lines             [][]string
 	lineWidths        []float64
@@ -83,7 +84,18 @@ func NewText(opts ...TextOpt) *Text {
 		o(t)
 	}
 
+	t.validate()
+
 	return t
+}
+
+func (t *Text) validate() {
+	if t.Color == nil {
+		panic("Text: Color is required.")
+	}
+	if t.Face == nil {
+		panic("Text: Face is required.")
+	}
 }
 
 func (o TextOptions) WidgetOpts(opts ...WidgetOpt) TextOpt {
@@ -92,10 +104,31 @@ func (o TextOptions) WidgetOpts(opts ...WidgetOpt) TextOpt {
 	}
 }
 
+// Text combines three options: TextLabel, TextFace and TextColor.
+// It can be used for the inline configurations of Text object while
+// separate functions are useful for a multi-step configuration.
 func (o TextOptions) Text(label string, face font.Face, color color.Color) TextOpt {
 	return func(t *Text) {
 		t.Label = label
 		t.Face = face
+		t.Color = color
+	}
+}
+
+func (o TextOptions) TextLabel(label string) TextOpt {
+	return func(t *Text) {
+		t.Label = label
+	}
+}
+
+func (o TextOptions) TextFace(face font.Face) TextOpt {
+	return func(t *Text) {
+		t.Face = face
+	}
+}
+
+func (o TextOptions) TextColor(color color.Color) TextOpt {
+	return func(t *Text) {
 		t.Color = color
 	}
 }
@@ -119,7 +152,7 @@ func (o TextOptions) ProcessBBCode(processBBCode bool) TextOpt {
 	}
 }
 
-// This sets the max width the text will allow before wrapping to the next line
+// MaxWidth sets the max width the text will allow before wrapping to the next line
 func (o TextOptions) MaxWidth(maxWidth float64) TextOpt {
 	return func(t *Text) {
 		t.MaxWidth = maxWidth
@@ -168,13 +201,29 @@ func (t *Text) draw(screen *ebiten.Image) {
 	case TextPositionCenter:
 		p = p.Add(image.Point{0, int((float64(r.Dy()) - t.measurements.boundingBoxHeight) / 2)})
 	case TextPositionEnd:
-		p = p.Add(image.Point{0, int((float64(r.Dy()) - t.measurements.boundingBoxHeight))})
+		p = p.Add(image.Point{0, int(float64(r.Dy()) - t.measurements.boundingBoxHeight)})
 	}
 
 	t.colorList = &datastructures.Stack[color.Color]{}
 	t.colorList.Push(&t.Color)
 
 	for i, line := range t.measurements.lines {
+		ly := int(math.Round(float64(p.Y) + t.measurements.lineHeight*float64(i) + t.measurements.ascent))
+		if ly > screen.Bounds().Max.Y+int(math.Round(t.measurements.ascent)) {
+			return
+		}
+		if ly < -int(math.Round(t.measurements.lineHeight-t.measurements.ascent)) {
+			continue
+		}
+		if t.widget.parent != nil {
+			if ly < t.widget.parent.Rect.Min.Y {
+				continue
+			}
+			if ly-int(math.Round(t.measurements.lineHeight)) > t.widget.parent.Rect.Max.Y {
+				return
+			}
+		}
+
 		lx := p.X
 		switch t.horizontalPosition {
 		case TextPositionCenter:
@@ -185,15 +234,13 @@ func (t *Text) draw(screen *ebiten.Image) {
 			lx += t.Inset.Left
 		}
 
-		ly := int(math.Round(float64(p.Y) + t.measurements.lineHeight*float64(i) + t.measurements.ascent))
-
 		if t.processBBCode {
 			spaceWidth := font.MeasureString(t.Face, " ").Round()
 			for _, word := range line {
-				peices, updatedColor := t.handleBBCodeColor(word)
-				for _, peice := range peices {
-					text.Draw(screen, peice.text, t.Face, lx, ly, peice.color)
-					wordWidth := font.MeasureString(t.Face, peice.text)
+				pieces, updatedColor := t.handleBBCodeColor(word)
+				for _, piece := range pieces {
+					text.Draw(screen, piece.text, t.Face, lx, ly, piece.color)
+					wordWidth := font.MeasureString(t.Face, piece.text)
 					lx += wordWidth.Round()
 				}
 				text.Draw(screen, " ", t.Face, lx, ly, updatedColor)
@@ -212,10 +259,15 @@ func (t *Text) handleBBCodeColor(word string) ([]bbCodeText, color.Color) {
 	if len(tags) > 0 {
 		resultStr := ""
 		isTag := false
-		for idx := range word {
+		// idx is a byte offset inside a utf8-encoded string,
+		// so it's correct for multi-byte runes (it can go like 0, 2, 4, ...);
+		// the word[idx] result is a single byte (not a proper rune),
+		// therefore a 2-value range is needed here to preserve a
+		// full multi-byte rune value.
+		for idx, ch := range word {
 			if len(tags) > 0 {
 				if tags[0][0] > idx || (isTag && idx < tags[0][1]) {
-					resultStr = resultStr + string(word[idx])
+					resultStr = resultStr + string(ch)
 				} else if tags[0][1] == idx {
 					if strings.HasPrefix(resultStr, COLOR_OPEN) {
 						c, err := colorutil.HexToColor(resultStr[6:12])
@@ -234,7 +286,7 @@ func (t *Text) handleBBCodeColor(word string) ([]bbCodeText, color.Color) {
 						resultStr = ""
 						isTag = true
 					} else {
-						resultStr = string(word[idx])
+						resultStr = string(ch)
 						isTag = false
 					}
 				} else {
@@ -243,7 +295,7 @@ func (t *Text) handleBBCodeColor(word string) ([]bbCodeText, color.Color) {
 					isTag = true
 				}
 			} else {
-				resultStr = resultStr + string(word[idx])
+				resultStr = resultStr + string(ch)
 			}
 		}
 		if len(resultStr) > 0 {
@@ -272,16 +324,17 @@ func (t *Text) handleBBCodeColor(word string) ([]bbCodeText, color.Color) {
 }
 
 func (t *Text) measure() {
-	if t.Label == t.measurements.label && t.Face == t.measurements.face && t.MaxWidth == t.measurements.maxWidth {
+	if t.Label == t.measurements.label && t.Face == t.measurements.face && t.MaxWidth == t.measurements.maxWidth && t.processBBCode == t.measurements.processBBCode {
 		return
 	}
 	m := t.Face.Metrics()
 
 	t.measurements = textMeasurements{
-		label:    t.Label,
-		face:     t.Face,
-		ascent:   fixedInt26_6ToFloat64(m.Ascent),
-		maxWidth: t.MaxWidth,
+		label:         t.Label,
+		face:          t.Face,
+		processBBCode: t.processBBCode,
+		ascent:        fixedInt26_6ToFloat64(m.Ascent),
+		maxWidth:      t.MaxWidth,
 	}
 
 	fh := fixedInt26_6ToFloat64(m.Ascent + m.Descent)
@@ -290,27 +343,32 @@ func (t *Text) measure() {
 
 	s := bufio.NewScanner(strings.NewReader(t.Label))
 	for s.Scan() {
-		if t.MaxWidth > 0 {
+		if t.MaxWidth > 0 || t.processBBCode {
 			var newLine []string
-			var newLineWidth float64 = float64(t.Inset.Left + t.Inset.Right)
+			newLineWidth := float64(t.Inset.Left + t.Inset.Right)
+			spaceWidth := fixedInt26_6ToFloat64(font.MeasureString(t.Face, " "))
 			words := strings.Split(s.Text(), " ")
-			for _, word := range words {
-				wordWidth := fixedInt26_6ToFloat64(font.MeasureString(t.Face, word+" "))
-
-				//Strip out any bbcodes from size calculation
-				if t.processBBCode {
-					if t.bbcodeRegex.MatchString(word) {
-						cleaned := t.bbcodeRegex.ReplaceAllString(word, "")
-						wordWidth = fixedInt26_6ToFloat64(font.MeasureString(t.Face, cleaned+" "))
-					}
+			for i, word := range words {
+				var wordWidth float64
+				if t.processBBCode && t.bbcodeRegex.MatchString(word) {
+					// Strip out any bbcodes from size calculation
+					cleaned := t.bbcodeRegex.ReplaceAllString(word, "")
+					wordWidth = fixedInt26_6ToFloat64(font.MeasureString(t.Face, cleaned))
+				} else {
+					wordWidth = fixedInt26_6ToFloat64(font.MeasureString(t.Face, word))
 				}
 
-				//If the new word doesnt push this past the max width continue adding to the current line
-				if newLineWidth+wordWidth < t.MaxWidth {
+				// Don't add the space to the last chunk.
+				if i != len(words)-1 {
+					wordWidth += spaceWidth
+				}
+
+				// If the new word doesn't push this past the max width continue adding to the current line
+				if t.MaxWidth == 0 || newLineWidth+wordWidth < t.MaxWidth {
 					newLine = append(newLine, word)
 					newLineWidth += wordWidth
 				} else {
-					//If the new word would push this past the max width save off the current line and start a new one
+					// If the new word would push this past the max width save off the current line and start a new one
 					if len(newLine) != 0 {
 						t.measurements.lines = append(t.measurements.lines, newLine)
 						t.measurements.lineWidths = append(t.measurements.lineWidths, newLineWidth)
@@ -323,7 +381,7 @@ func (t *Text) measure() {
 					newLineWidth = wordWidth + float64(t.Inset.Left+t.Inset.Right)
 				}
 			}
-			//Save the final line
+			// Save the final line
 			if len(newLine) != 0 {
 				t.measurements.lines = append(t.measurements.lines, newLine)
 				t.measurements.lineWidths = append(t.measurements.lineWidths, newLineWidth)

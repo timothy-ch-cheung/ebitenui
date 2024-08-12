@@ -13,16 +13,21 @@ import (
 )
 
 type Button struct {
-	Image             *ButtonImage
-	KeepPressedOnExit bool
-	ToggleMode        bool
-	GraphicImage      *ButtonImageImage
-	TextColor         *ButtonTextColor
+	Image                   *ButtonImage
+	IgnoreTransparentPixels bool
+	KeepPressedOnExit       bool
+	ToggleMode              bool
+	GraphicImage            *ButtonImageImage
+	TextColor               *ButtonTextColor
+
+	// Allows the user to disable space bar and enter automatically triggering a focused button.
+	DisableDefaultKeys bool
 
 	PressedEvent       *event.Event
 	ReleasedEvent      *event.Event
 	ClickedEvent       *event.Event
 	CursorEnteredEvent *event.Event
+	CursorMovedEvent   *event.Event
 	CursorExitedEvent  *event.Event
 	StateChangedEvent  *event.Event
 
@@ -33,18 +38,24 @@ type Button struct {
 	textPadding              Insets
 	graphicPadding           Insets
 
-	init      *MultiOnce
-	widget    *Widget
-	container *Container
-	graphic   *Graphic
-	text      *Text
-	hovering  bool
-	pressing  bool
-	state     WidgetState
+	init              *MultiOnce
+	widget            *Widget
+	container         *Container
+	graphic           *Graphic
+	mask              []byte
+	text              *Text
+	textLabel         string
+	textFace          font.Face
+	textProcessBBCode bool
+	hovering          bool
+	pressing          bool
+	state             WidgetState
 
 	tabOrder      int
 	focused       bool
 	justSubmitted bool
+
+	focusMap map[FocusDirection]Focuser
 }
 
 type ButtonOpt func(b *Button)
@@ -65,6 +76,8 @@ type ButtonImageImage struct {
 type ButtonTextColor struct {
 	Idle     color.Color
 	Disabled color.Color
+	Hover    color.Color
+	Pressed  color.Color
 }
 
 type ButtonPressedEventArgs struct {
@@ -81,16 +94,27 @@ type ButtonReleasedEventArgs struct {
 }
 
 type ButtonClickedEventArgs struct {
-	Button *Button
+	Button  *Button
+	OffsetX int
+	OffsetY int
 }
+
 type ButtonHoverEventArgs struct {
 	Button  *Button
 	Entered bool
+	OffsetX int
+	OffsetY int
+	DiffX   int
+	DiffY   int
 }
+
 type ButtonChangedEventArgs struct {
-	Button *Button
-	State  WidgetState
+	Button  *Button
+	State   WidgetState
+	OffsetX int
+	OffsetY int
 }
+
 type ButtonPressedHandlerFunc func(args *ButtonPressedEventArgs)
 
 type ButtonReleasedHandlerFunc func(args *ButtonReleasedEventArgs)
@@ -115,10 +139,13 @@ func NewButton(opts ...ButtonOpt) *Button {
 		ReleasedEvent:      &event.Event{},
 		ClickedEvent:       &event.Event{},
 		CursorEnteredEvent: &event.Event{},
+		CursorMovedEvent:   &event.Event{},
 		CursorExitedEvent:  &event.Event{},
 		StateChangedEvent:  &event.Event{},
 
 		init: &MultiOnce{},
+
+		focusMap: make(map[FocusDirection]Focuser),
 	}
 
 	b.init.Append(b.createWidget)
@@ -127,7 +154,33 @@ func NewButton(opts ...ButtonOpt) *Button {
 		o(b)
 	}
 
+	b.validate()
+
 	return b
+}
+
+func (b *Button) validate() {
+	if b.Image == nil {
+		panic("Button: Image is required.")
+	}
+	if b.Image.Idle == nil {
+		panic("Button: Image.Idle is required.")
+	}
+	if b.Image.Pressed == nil {
+		panic("Button: Image.Pressed is required.")
+	}
+
+	if len(b.textLabel) > 0 {
+		if b.textFace == nil {
+			panic("Button: TextFace is required if TextLabel is set.")
+		}
+		if b.TextColor == nil {
+			panic("Button: TextColor is required if TextLabel is set.")
+		}
+		if b.TextColor.Idle == nil {
+			panic("Button: TextColor.Idle is required if TextLabel is set.")
+		}
+	}
 }
 
 func (o ButtonOptions) WidgetOpts(opts ...WidgetOpt) ButtonOpt {
@@ -142,26 +195,48 @@ func (o ButtonOptions) Image(i *ButtonImage) ButtonOpt {
 	}
 }
 
+// IgnoreTransparentPixels disables mouse events like cursor entered,
+// moved and exited if the mouse pointer is over a pixel that is transparent
+// (alpha = 0). The source of pixels is Image.Idle. This options is
+// especially useful, if your button does not have a rectangular shape.
+func (o ButtonOptions) IgnoreTransparentPixels(ignoreTransparentPixels bool) ButtonOpt {
+	return func(b *Button) {
+		b.IgnoreTransparentPixels = ignoreTransparentPixels
+	}
+}
+
+// Text combines three options: TextLabel, TextFace and TextColor.
+// It can be used for the inline configurations of Text object while
+// separate functions are useful for a multi-step configuration.
 func (o ButtonOptions) Text(label string, face font.Face, color *ButtonTextColor) ButtonOpt {
 	return func(b *Button) {
-		b.init.Append(func() {
-			b.container = NewContainer(
-				ContainerOpts.Layout(NewAnchorLayout(AnchorLayoutOpts.Padding(b.textPadding))),
-				ContainerOpts.AutoDisableChildren(),
-			)
+		b.textLabel = label
+		b.textFace = face
+		b.TextColor = color
+	}
+}
 
-			b.text = NewText(
-				TextOpts.WidgetOpts(WidgetOpts.LayoutData(AnchorLayoutData{
-					HorizontalPosition: AnchorLayoutPosition(b.hTextPosition),
-					VerticalPosition:   AnchorLayoutPosition(b.vTextPosition),
-				})),
-				TextOpts.Text(label, face, color.Idle),
-			)
-			b.container.AddChild(b.text)
+func (o ButtonOptions) TextLabel(label string) ButtonOpt {
+	return func(b *Button) {
+		b.textLabel = label
+	}
+}
 
-			b.autoUpdateTextAndGraphic = true
-			b.TextColor = color
-		})
+func (o ButtonOptions) TextFace(face font.Face) ButtonOpt {
+	return func(b *Button) {
+		b.textFace = face
+	}
+}
+
+func (o ButtonOptions) TextColor(color *ButtonTextColor) ButtonOpt {
+	return func(b *Button) {
+		b.TextColor = color
+	}
+}
+
+func (o ButtonOptions) TextProcessBBCode(enabled bool) ButtonOpt {
+	return func(b *Button) {
+		b.textProcessBBCode = enabled
 	}
 }
 
@@ -188,7 +263,9 @@ func (o ButtonOptions) TextAndImage(label string, face font.Face, image *ButtonI
 				TextOpts.WidgetOpts(WidgetOpts.LayoutData(RowLayoutData{
 					Stretch: true,
 				})),
-				TextOpts.Text(label, face, color.Idle))
+				TextOpts.Text(label, face, color.Idle),
+				TextOpts.ProcessBBCode(b.textProcessBBCode),
+			)
 			c.AddChild(b.text)
 
 			b.graphic = NewGraphic(
@@ -267,6 +344,13 @@ func (o ButtonOptions) ToggleMode() ButtonOpt {
 	}
 }
 
+// This option will disable enter and space from submitting a focused button.
+func (o ButtonOptions) DisableDefaultKeys() ButtonOpt {
+	return func(b *Button) {
+		b.DisableDefaultKeys = true
+	}
+}
+
 func (o ButtonOptions) PressedHandler(f ButtonPressedHandlerFunc) ButtonOpt {
 	return func(b *Button) {
 		b.PressedEvent.AddHandler(func(args interface{}) {
@@ -294,6 +378,14 @@ func (o ButtonOptions) ClickedHandler(f ButtonClickedHandlerFunc) ButtonOpt {
 func (o ButtonOptions) CursorEnteredHandler(f ButtonCursorHoverHandlerFunc) ButtonOpt {
 	return func(b *Button) {
 		b.CursorEnteredEvent.AddHandler(func(args interface{}) {
+			f(args.(*ButtonHoverEventArgs))
+		})
+	}
+}
+
+func (o ButtonOptions) CursorMovedHandler(f ButtonCursorHoverHandlerFunc) ButtonOpt {
+	return func(b *Button) {
+		b.CursorMovedEvent.AddHandler(func(args interface{}) {
 			f(args.(*ButtonHoverEventArgs))
 		})
 	}
@@ -330,13 +422,15 @@ func (b *Button) SetState(state WidgetState) {
 		b.state = state
 
 		b.StateChangedEvent.Fire(&ButtonChangedEventArgs{
-			Button: b,
-			State:  b.state,
+			Button:  b,
+			State:   b.state,
+			OffsetX: -1,
+			OffsetY: -1,
 		})
 	}
 }
 
-func (b *Button) getStateChangedEvent() *event.Event {
+func (b *Button) GetStateChangedEvent() *event.Event {
 	return b.StateChangedEvent
 }
 
@@ -345,6 +439,8 @@ func (b *Button) Configure(opts ...ButtonOpt) {
 		o(b)
 	}
 }
+
+/** Focuser Interface - Start **/
 
 func (b *Button) Focus(focused bool) {
 	b.init.Do()
@@ -359,6 +455,16 @@ func (b *Button) IsFocused() bool {
 func (b *Button) TabOrder() int {
 	return b.tabOrder
 }
+
+func (b *Button) GetFocus(direction FocusDirection) Focuser {
+	return b.focusMap[direction]
+}
+
+func (b *Button) AddFocus(direction FocusDirection, focus Focuser) {
+	b.focusMap[direction] = focus
+}
+
+/** Focuser Interface - End **/
 
 func (b *Button) GetWidget() *Widget {
 	b.init.Do()
@@ -394,6 +500,17 @@ func (b *Button) PreferredSize() (int, int) {
 
 func (b *Button) SetLocation(rect img.Rectangle) {
 	b.init.Do()
+
+	if b.IgnoreTransparentPixels && (b.mask == nil || b.widget.Rect == img.Rectangle{} || b.widget.Rect.Dx() != rect.Dx() || b.widget.Rect.Dy() != rect.Dy()) {
+		maskImage := ebiten.NewImage(rect.Dx(), rect.Dy())
+		b.Image.Idle.Draw(maskImage, maskImage.Bounds().Dx(), maskImage.Bounds().Dy(), func(_ *ebiten.DrawImageOptions) {})
+
+		wx := maskImage.Bounds().Dx()
+		wy := maskImage.Bounds().Dy()
+		b.mask = make([]byte, wx*wy*4)
+		maskImage.ReadPixels(b.mask)
+	}
+
 	b.widget.Rect = rect
 }
 
@@ -424,12 +541,17 @@ func (b *Button) Render(screen *ebiten.Image, def DeferredRenderFunc) {
 	}
 
 	b.widget.Render(screen, def)
-	b.handleSubmit()
 	b.draw(screen)
 
+	if !b.DisableDefaultKeys {
+		b.handleSubmit()
+	} else {
+		b.justSubmitted = false
+	}
+
 	if b.autoUpdateTextAndGraphic {
-		if b.graphic != nil {
-			if b.widget.Disabled {
+		if b.GraphicImage != nil {
+			if b.widget.Disabled && b.GraphicImage.Disabled != nil {
 				b.graphic.Image = b.GraphicImage.Disabled
 			} else {
 				b.graphic.Image = b.GraphicImage.Idle
@@ -437,8 +559,12 @@ func (b *Button) Render(screen *ebiten.Image, def DeferredRenderFunc) {
 		}
 
 		if b.text != nil {
-			if b.widget.Disabled {
+			if b.widget.Disabled && b.TextColor.Disabled != nil {
 				b.text.Color = b.TextColor.Disabled
+			} else if b.pressing && ((b.hovering || b.KeepPressedOnExit) || (b.ToggleMode && b.state == WidgetChecked) || b.justSubmitted) && b.TextColor.Pressed != nil {
+				b.text.Color = b.TextColor.Pressed
+			} else if (b.hovering || b.focused) && b.TextColor.Hover != nil {
+				b.text.Color = b.TextColor.Hover
 			} else {
 				b.text.Color = b.TextColor.Idle
 			}
@@ -457,6 +583,12 @@ func (b *Button) draw(screen *ebiten.Image) {
 		if b.Image.Disabled != nil {
 			i = b.Image.Disabled
 		}
+
+	case b.pressing && (b.hovering || b.KeepPressedOnExit) || (b.ToggleMode && b.state == WidgetChecked) || b.justSubmitted:
+		if b.Image.Pressed != nil {
+			i = b.Image.Pressed
+		}
+
 	case b.focused, b.hovering:
 		if b.ToggleMode && b.state == WidgetChecked || b.pressing && (b.hovering || b.KeepPressedOnExit) {
 			if b.Image.PressedHover != nil {
@@ -469,11 +601,6 @@ func (b *Button) draw(screen *ebiten.Image) {
 				i = b.Image.Hover
 			}
 		}
-	case b.pressing && (b.hovering || b.KeepPressedOnExit) || (b.ToggleMode && b.state == WidgetChecked):
-		if b.Image.Pressed != nil {
-			i = b.Image.Pressed
-		}
-
 	}
 
 	if i != nil {
@@ -484,24 +611,34 @@ func (b *Button) draw(screen *ebiten.Image) {
 	}
 }
 
+func (b *Button) Click() {
+	b.init.Do()
+
+	b.justSubmitted = true
+	b.ClickedEvent.Fire(&ButtonClickedEventArgs{
+		Button:  b,
+		OffsetX: -1,
+		OffsetY: -1,
+	})
+	if b.ToggleMode {
+		if b.state == WidgetUnchecked {
+			b.state = WidgetChecked
+		} else {
+			b.state = WidgetUnchecked
+		}
+		b.StateChangedEvent.Fire(&ButtonChangedEventArgs{
+			Button:  b,
+			State:   b.state,
+			OffsetX: -1,
+			OffsetY: -1,
+		})
+	}
+}
+
 func (b *Button) handleSubmit() {
 	if input.KeyPressed(ebiten.KeyEnter) || input.KeyPressed(ebiten.KeySpace) {
 		if !b.justSubmitted && b.focused {
-			b.ClickedEvent.Fire(&ButtonClickedEventArgs{
-				Button: b,
-			})
-			if b.ToggleMode {
-				if b.state == WidgetUnchecked {
-					b.state = WidgetChecked
-				} else {
-					b.state = WidgetUnchecked
-				}
-				b.StateChangedEvent.Fire(&ButtonChangedEventArgs{
-					Button: b,
-					State:  b.state,
-				})
-			}
-			b.justSubmitted = true
+			b.Click()
 		}
 	} else {
 		b.justSubmitted = false
@@ -519,50 +656,135 @@ func (b *Button) Text() *Text {
 	return b.text
 }
 
+func (b *Button) initText() {
+	if b.TextColor == nil {
+		return // Nothing to do
+	}
+
+	// We're expecting all 3 options to be present: label, font face and color.
+	// TODO: add some sort of the error checking/reporting here.
+	// Even if users use a Text() 3-in-one API, they can pass nil or something.
+
+	b.container = NewContainer(
+		ContainerOpts.Layout(NewAnchorLayout(AnchorLayoutOpts.Padding(b.textPadding))),
+		ContainerOpts.AutoDisableChildren(),
+	)
+
+	b.text = NewText(
+		TextOpts.WidgetOpts(WidgetOpts.LayoutData(AnchorLayoutData{
+			HorizontalPosition: AnchorLayoutPosition(b.hTextPosition),
+			VerticalPosition:   AnchorLayoutPosition(b.vTextPosition),
+		})),
+		TextOpts.Text(b.textLabel, b.textFace, b.TextColor.Idle),
+		TextOpts.ProcessBBCode(b.textProcessBBCode),
+	)
+	b.container.AddChild(b.text)
+
+	b.autoUpdateTextAndGraphic = true
+}
+
 func (b *Button) createWidget() {
-	b.widget = NewWidget(append(b.widgetOpts, []WidgetOpt{
-		WidgetOpts.CursorEnterHandler(func(_ *WidgetCursorEnterEventArgs) {
-			if !b.widget.Disabled {
-				b.hovering = true
+	b.widget = NewWidget(append([]WidgetOpt{
+		WidgetOpts.TrackHover(true),
+		WidgetOpts.CursorEnterHandler(func(args *WidgetCursorEnterEventArgs) {
+			if b.mask == nil {
+				if !b.widget.Disabled {
+					b.hovering = true
+				}
+				if b.hovering {
+					b.CursorEnteredEvent.Fire(&ButtonHoverEventArgs{
+						Button:  b,
+						Entered: true,
+						OffsetX: args.OffsetX,
+						OffsetY: args.OffsetY,
+						DiffX:   0,
+						DiffY:   0,
+					})
+				}
 			}
-			b.CursorEnteredEvent.Fire(&ButtonHoverEventArgs{
-				Button:  b,
-				Entered: true,
-			})
 		}),
 
-		WidgetOpts.CursorExitHandler(func(_ *WidgetCursorExitEventArgs) {
-			b.hovering = false
-			b.CursorExitedEvent.Fire(&ButtonHoverEventArgs{
-				Button:  b,
-				Entered: false,
-			})
+		WidgetOpts.CursorMoveHandler(func(args *WidgetCursorMoveEventArgs) {
+			if b.onMask(args.OffsetX, args.OffsetY) {
+				if !b.hovering {
+					b.CursorEnteredEvent.Fire(&ButtonHoverEventArgs{
+						Button:  b,
+						Entered: true,
+						OffsetX: args.OffsetX,
+						OffsetY: args.OffsetY,
+						DiffX:   0,
+						DiffY:   0,
+					})
+				}
+				if !b.widget.Disabled {
+					b.hovering = true
+				}
+				b.CursorMovedEvent.Fire(&ButtonHoverEventArgs{
+					Button:  b,
+					Entered: false,
+					OffsetX: args.OffsetX,
+					OffsetY: args.OffsetY,
+					DiffX:   args.DiffX,
+					DiffY:   args.DiffY,
+				})
+			} else {
+				if b.hovering {
+					b.hovering = false
+					b.CursorExitedEvent.Fire(&ButtonHoverEventArgs{
+						Button:  b,
+						Entered: false,
+						OffsetX: args.OffsetX,
+						OffsetY: args.OffsetY,
+						DiffX:   0,
+						DiffY:   0,
+					})
+				}
+			}
+		}),
+
+		WidgetOpts.CursorExitHandler(func(args *WidgetCursorExitEventArgs) {
+			if b.hovering || b.mask == nil {
+				b.hovering = false
+				b.CursorExitedEvent.Fire(&ButtonHoverEventArgs{
+					Button:  b,
+					Entered: false,
+					OffsetX: args.OffsetX,
+					OffsetY: args.OffsetY,
+					DiffX:   0,
+					DiffY:   0,
+				})
+			}
 		}),
 
 		WidgetOpts.MouseButtonPressedHandler(func(args *WidgetMouseButtonPressedEventArgs) {
-			if !b.widget.Disabled && args.Button == ebiten.MouseButtonLeft {
-				b.pressing = true
-
-				b.PressedEvent.Fire(&ButtonPressedEventArgs{
-					Button:  b,
-					OffsetX: args.OffsetX,
-					OffsetY: args.OffsetY,
-				})
+			if b.onMask(args.OffsetX, args.OffsetY) {
+				if !b.widget.Disabled && args.Button == ebiten.MouseButtonLeft {
+					b.pressing = true
+					b.PressedEvent.Fire(&ButtonPressedEventArgs{
+						Button:  b,
+						OffsetX: args.OffsetX,
+						OffsetY: args.OffsetY,
+					})
+				}
 			}
 		}),
 
 		WidgetOpts.MouseButtonReleasedHandler(func(args *WidgetMouseButtonReleasedEventArgs) {
 			if b.pressing && !b.widget.Disabled && args.Button == ebiten.MouseButtonLeft {
+				inside := args.Inside && b.onMask(args.OffsetX, args.OffsetY)
+
 				b.ReleasedEvent.Fire(&ButtonReleasedEventArgs{
 					Button:  b,
-					Inside:  args.Inside,
+					Inside:  inside,
 					OffsetX: args.OffsetX,
 					OffsetY: args.OffsetY,
 				})
 
-				if args.Inside {
+				if inside {
 					b.ClickedEvent.Fire(&ButtonClickedEventArgs{
-						Button: b,
+						Button:  b,
+						OffsetX: args.OffsetX,
+						OffsetY: args.OffsetY,
 					})
 					if b.ToggleMode {
 						if b.state == WidgetUnchecked {
@@ -571,8 +793,10 @@ func (b *Button) createWidget() {
 							b.state = WidgetUnchecked
 						}
 						b.StateChangedEvent.Fire(&ButtonChangedEventArgs{
-							Button: b,
-							State:  b.state,
+							Button:  b,
+							State:   b.state,
+							OffsetX: args.OffsetX,
+							OffsetY: args.OffsetY,
 						})
 					}
 				}
@@ -580,6 +804,16 @@ func (b *Button) createWidget() {
 
 			b.pressing = false
 		}),
-	}...)...)
+	}, b.widgetOpts...)...)
 	b.widgetOpts = nil
+
+	b.initText()
+}
+
+func (b *Button) onMask(x, y int) bool {
+	if b.mask == nil {
+		return true
+	}
+	i := ((x * 4) + (y * b.widget.Rect.Dx() * 4) + 3)
+	return (b.mask[i] > 0)
 }

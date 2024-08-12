@@ -34,7 +34,7 @@ type List struct {
 	hideHorizontalSlider        bool
 	hideVerticalSlider          bool
 	allowReselect               bool
-	selectFocus               bool
+	selectFocus                 bool
 
 	init            *MultiOnce
 	container       *Container
@@ -51,6 +51,8 @@ type List struct {
 	justMoved          bool
 	focusIndex         int
 	prevFocusIndex     int
+
+	focusMap map[FocusDirection]Focuser
 }
 
 type ListOpt func(l *List)
@@ -62,8 +64,10 @@ type ListEntryColor struct {
 	Selected                   color.Color
 	DisabledUnselected         color.Color
 	DisabledSelected           color.Color
+	SelectingBackground        color.Color
 	SelectedBackground         color.Color
 	FocusedBackground          color.Color
+	SelectingFocusedBackground color.Color
 	SelectedFocusedBackground  color.Color
 	DisabledSelectedBackground color.Color
 }
@@ -91,6 +95,7 @@ func NewList(opts ...ListOpt) *List {
 		init:           &MultiOnce{},
 		focusIndex:     0,
 		prevFocusIndex: -1,
+		focusMap:       make(map[FocusDirection]Focuser),
 	}
 
 	l.init.Append(l.createWidget)
@@ -101,7 +106,30 @@ func NewList(opts ...ListOpt) *List {
 
 	l.resetFocusIndex()
 
+	l.validate()
+
 	return l
+}
+
+func (l *List) validate() {
+	if len(l.scrollContainerOpts) == 0 {
+		panic("List: ScrollContainerOpts are required.")
+	}
+	if len(l.sliderOpts) == 0 {
+		panic("List: SliderOpts are required.")
+	}
+	if l.entryFace == nil {
+		panic("List: EntryFontFace is required.")
+	}
+	if l.entryLabelFunc == nil {
+		panic("List: EntryLabelFunc is required.")
+	}
+	if l.entryTextColor == nil || l.entryTextColor.Idle == nil {
+		panic("List: ListEntryColor.Selected is required.")
+	}
+	if l.entryUnselectedTextColor == nil || l.entryUnselectedTextColor.Idle == nil {
+		panic("List: ListEntryColor.Unselected is required.")
+	}
 }
 
 func (o ListOptions) ContainerOpts(opts ...ContainerOpt) ListOpt {
@@ -170,12 +198,14 @@ func (o ListOptions) EntryColor(c *ListEntryColor) ListOpt {
 			Idle:     image.NewNineSliceColor(color.Transparent),
 			Disabled: image.NewNineSliceColor(color.Transparent),
 			Hover:    image.NewNineSliceColor(c.FocusedBackground),
+			Pressed:  image.NewNineSliceColor(c.SelectingBackground),
 		}
 
 		l.entrySelectedColor = &ButtonImage{
 			Idle:     image.NewNineSliceColor(c.SelectedBackground),
 			Disabled: image.NewNineSliceColor(c.DisabledSelectedBackground),
 			Hover:    image.NewNineSliceColor(c.SelectedFocusedBackground),
+			Pressed:  image.NewNineSliceColor(c.SelectingFocusedBackground),
 		}
 
 		l.entryUnselectedTextColor = &ButtonTextColor{
@@ -269,15 +299,20 @@ func (l *List) Render(screen *ebiten.Image, def DeferredRenderFunc) {
 	}
 	l.scrollContainer.GetWidget().Disabled = d
 
-	l.handleInput()
 	if l.focusIndex != l.prevFocusIndex && l.focusIndex >= 0 && l.focusIndex < len(l.buttons) {
 		l.scrollVisible(l.buttons[l.focusIndex])
-		if l.selectFocus {
-			l.setSelectedEntry(l.entries[l.focusIndex], false)
-		}
 	}
+
+	l.handleInput()
+
+	if l.selectFocus {
+		l.SelectFocused()
+	}
+
 	l.container.Render(screen, def)
 }
+
+/** Focuser Interface - Start **/
 
 func (l *List) Focus(focused bool) {
 	l.init.Do()
@@ -293,32 +328,73 @@ func (l *List) TabOrder() int {
 	return l.tabOrder
 }
 
+func (l *List) GetFocus(direction FocusDirection) Focuser {
+	return l.focusMap[direction]
+}
+
+func (l *List) AddFocus(direction FocusDirection, focus Focuser) {
+	l.focusMap[direction] = focus
+}
+
+/** Focuser Interface - End **/
+
 func (l *List) handleInput() {
 	if l.focused && !l.GetWidget().Disabled && len(l.buttons) > 0 {
-		if input.KeyPressed(ebiten.KeyUp) || input.KeyPressed(ebiten.KeyDown) {
+		if !l.disableDefaultKeys && (input.KeyPressed(ebiten.KeyUp) || input.KeyPressed(ebiten.KeyDown)) {
 			if !l.justMoved {
-				direction := -1
 				if input.KeyPressed(ebiten.KeyDown) {
-					direction = 1
+					l.FocusNext()
+				} else {
+					l.FocusPrevious()
 				}
-				l.buttons[l.focusIndex].focused = false
-				l.prevFocusIndex = l.focusIndex
-				l.focusIndex += direction
-				if l.focusIndex < 0 {
-					l.focusIndex = len(l.buttons) - 1
-				}
-				if l.focusIndex >= len(l.buttons) {
-					l.focusIndex = 0
-				}
-				l.justMoved = true
 			}
 		} else {
 			l.justMoved = false
 		}
-
 		l.buttons[l.focusIndex].focused = true
 	} else if len(l.buttons) > 0 && l.focusIndex <= len(l.buttons) {
 		l.buttons[l.focusIndex].focused = false
+	}
+}
+
+func (l *List) FocusNext() {
+	if len(l.buttons) > 0 {
+		direction := 1
+		l.buttons[l.focusIndex].focused = false
+		l.prevFocusIndex = l.focusIndex
+		l.focusIndex += direction
+		if l.focusIndex < 0 {
+			l.focusIndex = len(l.buttons) - 1
+		}
+		if l.focusIndex >= len(l.buttons) {
+			l.focusIndex = 0
+		}
+		l.justMoved = true
+		l.buttons[l.focusIndex].focused = true
+	}
+}
+
+func (l *List) FocusPrevious() {
+	if len(l.buttons) > 0 {
+		direction := -1
+		l.buttons[l.focusIndex].focused = false
+		l.prevFocusIndex = l.focusIndex
+		l.focusIndex += direction
+		if l.focusIndex < 0 {
+			l.focusIndex = len(l.buttons) - 1
+		}
+		if l.focusIndex >= len(l.buttons) {
+			l.focusIndex = 0
+		}
+		l.justMoved = true
+		l.buttons[l.focusIndex].focused = true
+	}
+}
+
+func (l *List) SelectFocused() {
+	if l.focusIndex >= 0 && l.focusIndex < len(l.buttons) {
+		l.scrollVisible(l.buttons[l.focusIndex])
+		l.setSelectedEntry(l.entries[l.focusIndex], false)
 	}
 }
 
@@ -349,11 +425,14 @@ func (l *List) createWidget() {
 	}
 
 	l.container = NewContainer(
-		append(l.containerOpts,
+		append([]ContainerOpt{
+			ContainerOpts.WidgetOpts(WidgetOpts.TrackHover(true)),
 			ContainerOpts.Layout(NewGridLayout(
 				GridLayoutOpts.Columns(cols),
 				GridLayoutOpts.Stretch([]bool{true, false}, []bool{true, false}),
-				GridLayoutOpts.Spacing(l.controlWidgetSpacing, l.controlWidgetSpacing))))...)
+				GridLayoutOpts.Spacing(l.controlWidgetSpacing, l.controlWidgetSpacing),
+			))}, l.containerOpts...)...,
+	)
 
 	l.listContent = NewContainer(
 		ContainerOpts.Layout(NewRowLayout(
@@ -379,7 +458,7 @@ func (l *List) createWidget() {
 
 	if !l.hideVerticalSlider {
 		pageSizeFunc := func() int {
-			return int(math.Round(float64(l.scrollContainer.ContentRect().Dy()) / float64(l.listContent.GetWidget().Rect.Dy()) * 1000))
+			return int(math.Round(float64(l.scrollContainer.ViewRect().Dy()) / float64(l.listContent.GetWidget().Rect.Dy()) * 1000))
 		}
 
 		l.vSlider = NewSlider(append(l.sliderOpts, []SliderOpt{
@@ -412,7 +491,7 @@ func (l *List) createWidget() {
 			SliderOpts.Direction(DirectionHorizontal),
 			SliderOpts.MinMax(0, 1000),
 			SliderOpts.PageSizeFunc(func() int {
-				return int(math.Round(float64(l.scrollContainer.ContentRect().Dx()) / float64(l.listContent.GetWidget().Rect.Dx()) * 1000))
+				return int(math.Round(float64(l.scrollContainer.ViewRect().Dx()) / float64(l.listContent.GetWidget().Rect.Dx()) * 1000))
 			}),
 			SliderOpts.ChangedHandler(func(args *SliderChangedEventArgs) {
 				l.scrollContainer.ScrollLeft = float64(args.Slider.Current) / 1000
@@ -425,8 +504,15 @@ func (l *List) createWidget() {
 
 // Updates the entries in the list.
 // Note: Duplicates will be removed.
-func (l *List) SetEntries(entries []any) {
-	l.entries = slices.CompactFunc(entries, func(a any, b any) bool { return a == b })
+func (l *List) SetEntries(newEntries []any) {
+	l.entries = nil
+	for idx := range newEntries {
+		if !slices.ContainsFunc(l.entries, func(cmp any) bool {
+			return cmp == newEntries[idx]
+		}) {
+			l.entries = append(l.entries, newEntries[idx])
+		}
+	}
 	l.selectedEntry = nil
 	l.container.RemoveChildren()
 	l.createWidget()
@@ -464,7 +550,7 @@ func (l *List) RemoveEntry(entry any) {
 // Note: Duplicates will not be added
 func (l *List) AddEntry(entry any) {
 	l.init.Do()
-	if !l.checkForDuplicates(append(l.entries, entry)) {
+	if !l.checkForDuplicates(l.entries, entry) {
 		l.entries = append(l.entries, entry)
 		but := l.createEntry(entry)
 		l.buttons = append(l.buttons, but)
@@ -514,10 +600,10 @@ func (l *List) setSelectedEntry(e any, user bool) {
 	}
 }
 
-func (l *List) checkForDuplicates(entries []any) bool {
-	entryLen := len(entries)
-	entries = slices.CompactFunc(entries, func(a any, b any) bool { return a == b })
-	return entryLen != len(entries)
+func (l *List) checkForDuplicates(entries []any, entry any) bool {
+	return slices.ContainsFunc(entries, func(cmp any) bool {
+		return cmp == entry
+	})
 }
 
 func (l *List) createEntry(entry any) *Button {
@@ -552,35 +638,35 @@ func (l *List) setScrollLeft(left float64) {
 	l.scrollContainer.ScrollLeft = left
 }
 
-func scrollClamp(scroll float64) float64 {
-	min, max := -0.1, 0.1
-	if scroll < min {
-		scroll = min
-	} else if scroll > max {
-		scroll = max
-	}
-	return scroll
-}
-
 func (l *List) scrollVisible(w HasWidget) {
-	rect := l.scrollContainer.ContentRect()
+	vrect := l.scrollContainer.ViewRect()
 	wrect := w.GetWidget().Rect
-	if !wrect.In(rect) {
-		ScrollTop := 0.0
-		ScrollLeft := 0.0
-		if wrect.Max.Y > rect.Max.Y {
-			ScrollTop = float64(wrect.Max.Y - rect.Max.Y)
-		} else if wrect.Min.Y < rect.Min.Y {
-			ScrollTop = float64(wrect.Min.Y - rect.Min.Y)
+	if !wrect.In(vrect) {
+		crect := l.scrollContainer.ContentRect()
+		scrollTop := l.scrollContainer.ScrollTop
+		scrollHeight := crect.Dy() - vrect.Dy()
+		if wrect.Max.Y > vrect.Max.Y {
+			scrollTop = float64(wrect.Max.Y-vrect.Dy()-crect.Min.Y) / float64(scrollHeight)
+		} else if wrect.Min.Y < vrect.Min.Y {
+			scrollTop = float64(wrect.Min.Y-crect.Min.Y) / float64(scrollHeight)
 		}
-		if wrect.Max.X > rect.Max.X {
-			ScrollLeft = float64(wrect.Max.X - rect.Max.X)
-		} else if wrect.Min.X < rect.Min.X {
-			ScrollLeft = -float64(wrect.Min.X - rect.Min.X)
+		scrollLeft := l.scrollContainer.ScrollLeft
+		scrollWidth := crect.Dx() - vrect.Dx()
+		if wrect.Max.X > vrect.Max.X {
+			scrollLeft = float64(wrect.Max.X-vrect.Dx()-crect.Min.X) / float64(scrollWidth)
+		} else if wrect.Min.X < vrect.Min.X {
+			scrollLeft = float64(wrect.Min.X-crect.Min.X) / float64(scrollWidth)
 		}
-		l.setScrollTop(l.scrollContainer.ScrollTop + scrollClamp(ScrollTop/1000))
-		l.setScrollLeft(l.scrollContainer.ScrollLeft + scrollClamp(ScrollLeft/1000))
-	} else if wrect != rect {
+		l.setScrollTop(scrollClamp(scrollTop, l.scrollContainer.ScrollTop))
+		l.setScrollLeft(scrollClamp(scrollLeft, l.scrollContainer.ScrollLeft))
+	} else if wrect != vrect {
 		l.prevFocusIndex = l.focusIndex
 	}
+}
+
+func scrollClamp(targetScroll, currentScroll float64) float64 {
+	const maxScrollStep = 0.1
+	minScroll := currentScroll - maxScrollStep
+	maxScroll := currentScroll + maxScrollStep
+	return math.Max(minScroll, math.Min(targetScroll, maxScroll))
 }

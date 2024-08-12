@@ -76,7 +76,24 @@ func NewTextArea(opts ...TextAreaOpt) *TextArea {
 		o(l)
 	}
 
+	l.validate()
+
 	return l
+}
+
+func (t *TextArea) validate() {
+	if t.foregroundColor == nil {
+		panic("TextArea: FontColor is required.")
+	}
+	if t.face == nil {
+		panic("TextArea: FontFace is required.")
+	}
+	if len(t.scrollContainerOpts) == 0 {
+		panic("TextArea: ScrollContainerOpts are required.")
+	}
+	if len(t.sliderOpts) == 0 {
+		panic("TextArea: SliderOpts are required.")
+	}
 }
 
 // Specify the Container options for the text area
@@ -240,11 +257,14 @@ func (l *TextArea) createWidget() {
 	}
 
 	l.container = NewContainer(
-		append(l.containerOpts,
+		append([]ContainerOpt{
+			ContainerOpts.WidgetOpts(WidgetOpts.TrackHover(true)),
 			ContainerOpts.Layout(NewGridLayout(
 				GridLayoutOpts.Columns(cols),
 				GridLayoutOpts.Stretch([]bool{true, false}, []bool{true, false}),
-				GridLayoutOpts.Spacing(l.controlWidgetSpacing, l.controlWidgetSpacing))))...)
+				GridLayoutOpts.Spacing(l.controlWidgetSpacing, l.controlWidgetSpacing))),
+			}, l.containerOpts...,
+			)...)
 	l.containerOpts = nil
 
 	content := NewContainer(
@@ -258,6 +278,7 @@ func (l *TextArea) createWidget() {
 		TextOpts.ProcessBBCode(l.processBBCode),
 	)
 	content.AddChild(l.text)
+	l.text.widget.parent = l.container.GetWidget()
 
 	l.scrollContainer = NewScrollContainer(append(l.scrollContainerOpts, []ScrollContainerOpt{
 		ScrollContainerOpts.Content(content),
@@ -268,7 +289,7 @@ func (l *TextArea) createWidget() {
 
 	if l.showVerticalSlider {
 		pageSizeFunc := func() int {
-			return int(math.Round(float64(l.scrollContainer.ContentRect().Dy()) / float64(content.GetWidget().Rect.Dy()) * 1000))
+			return int(math.Round(float64(l.scrollContainer.ViewRect().Dy()) / float64(content.GetWidget().Rect.Dy()) * 1000))
 		}
 
 		l.vSlider = NewSlider(append(l.sliderOpts, []SliderOpt{
@@ -303,7 +324,7 @@ func (l *TextArea) createWidget() {
 
 	if l.showHorizontalSlider {
 		pageSizeFunc := func() int {
-			return int(math.Round(float64(l.scrollContainer.ContentRect().Dx()) / float64(content.GetWidget().Rect.Dx()) * 1000))
+			return int(math.Round(float64(l.scrollContainer.ViewRect().Dx()) / float64(content.GetWidget().Rect.Dx()) * 1000))
 		}
 
 		l.hSlider = NewSlider(append(l.sliderOpts, []SliderOpt{

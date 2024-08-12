@@ -5,7 +5,7 @@ import (
 
 	"github.com/ebitenui/ebitenui/event"
 	"github.com/ebitenui/ebitenui/input"
-
+	internalinput "github.com/ebitenui/ebitenui/internal/input"
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -42,6 +42,9 @@ type Widget struct {
 	// CursorEnterEvent fires an event with *WidgetCursorEnterEventArgs when the cursor enters the widget's Rect.
 	CursorEnterEvent *event.Event
 
+	// CursorMoveEvent fires an event with *WidgetCursorMoveEventArgs when the cursor moves within the widget's Rect.
+	CursorMoveEvent *event.Event
+
 	// CursorExitEvent fires an event with *WidgetCursorExitEventArgs when the cursor exits the widget's Rect.
 	CursorExitEvent *event.Event
 
@@ -65,8 +68,10 @@ type Widget struct {
 
 	DragAndDropEvent *event.Event
 
-	//Custom Data is a field to allow users to attach data to any widget
+	// Custom Data is a field to allow users to attach data to any widget
 	CustomData interface{}
+	// This allows for non-focusable widgets (Containers) to report hover.
+	TrackHover bool
 
 	canDrop CanDropFunc
 	drop    DropFunc
@@ -74,6 +79,7 @@ type Widget struct {
 	parent                      *Widget
 	self                        HasWidget
 	lastUpdateCursorEntered     bool
+	lastUpdateCursorPosition    image.Point
 	lastUpdateMouseLeftPressed  bool
 	lastUpdateMouseRightPressed bool
 	mouseLeftPressedInside      bool
@@ -106,10 +112,28 @@ type Renderer interface {
 	Render(screen *ebiten.Image, def DeferredRenderFunc)
 }
 
+type FocusDirection int
+
+const (
+	FOCUS_NEXT FocusDirection = iota
+	FOCUS_PREVIOUS
+	FOCUS_NORTH
+	FOCUS_NORTHEAST
+	FOCUS_EAST
+	FOCUS_SOUTHEAST
+	FOCUS_SOUTH
+	FOCUS_SOUTHWEST
+	FOCUS_WEST
+	FOCUS_NORTHWEST
+)
+
 type Focuser interface {
+	HasWidget
 	Focus(focused bool)
 	IsFocused() bool
 	TabOrder() int
+	GetFocus(direction FocusDirection) Focuser
+	AddFocus(direction FocusDirection, focus Focuser)
 }
 
 type Dropper interface {
@@ -139,11 +163,40 @@ type PreferredSizer interface {
 // WidgetCursorEnterEventArgs are the arguments for cursor enter events.
 type WidgetCursorEnterEventArgs struct { //nolint:golint
 	Widget *Widget
+
+	// OffsetX is the x offset relative to the widget's Rect.
+	OffsetX int
+
+	// OffsetY is the y offset relative to the widget's Rect.
+	OffsetY int
+}
+
+// WidgetCursorMoveEventArgs are the arguments for cursor move events.
+type WidgetCursorMoveEventArgs struct { //nolint:golint
+	Widget *Widget
+
+	// OffsetX is the x offset relative to the widget's Rect.
+	OffsetX int
+
+	// OffsetY is the y offset relative to the widget's Rect.
+	OffsetY int
+
+	// DiffX is the x change to the old mouse cursor position.
+	DiffX int
+
+	// DiffY is the y change to the old mouse cursor position.
+	DiffY int
 }
 
 // WidgetCursorExitEventArgs are the arguments for cursor exit events.
 type WidgetCursorExitEventArgs struct { //nolint:golint
 	Widget *Widget
+
+	// OffsetX is the x offset relative to the widget's Rect.
+	OffsetX int
+
+	// OffsetY is the y offset relative to the widget's Rect.
+	OffsetY int
 }
 
 // WidgetMouseButtonPressedEventArgs are the arguments for mouse button press events.
@@ -220,6 +273,9 @@ type DragAndDropDroppedHandlerFunc func(args *DragAndDropDroppedEventArgs)
 // WidgetCursorEnterHandlerFunc is a function that handles cursor enter events.
 type WidgetCursorEnterHandlerFunc func(args *WidgetCursorEnterEventArgs) //nolint:golint
 
+// WidgetCursorMoveHandlerFunc is a function that handles cursor move events.
+type WidgetCursorMoveHandlerFunc func(args *WidgetCursorMoveEventArgs) //nolint:golint
+
 // WidgetCursorExitHandlerFunc is a function that handles cursor exit events.
 type WidgetCursorExitHandlerFunc func(args *WidgetCursorExitEventArgs) //nolint:golint
 
@@ -244,6 +300,7 @@ var deferredRenders []RenderFunc
 func NewWidget(opts ...WidgetOpt) *Widget {
 	w := &Widget{
 		CursorEnterEvent:         &event.Event{},
+		CursorMoveEvent:          &event.Event{},
 		CursorExitEvent:          &event.Event{},
 		MouseButtonPressedEvent:  &event.Event{},
 		MouseButtonReleasedEvent: &event.Event{},
@@ -274,6 +331,15 @@ func (o WidgetOptions) CursorEnterHandler(f WidgetCursorEnterHandlerFunc) Widget
 	return func(w *Widget) {
 		w.CursorEnterEvent.AddHandler(func(args interface{}) {
 			f(args.(*WidgetCursorEnterEventArgs))
+		})
+	}
+}
+
+// WithCursorMoveHandler configures a Widget with cursor move event handler f.
+func (o WidgetOptions) CursorMoveHandler(f WidgetCursorMoveHandlerFunc) WidgetOpt {
+	return func(w *Widget) {
+		w.CursorMoveEvent.AddHandler(func(args interface{}) {
+			f(args.(*WidgetCursorMoveEventArgs))
 		})
 	}
 }
@@ -381,6 +447,13 @@ func (o WidgetOptions) CursorPressed(cursorPressed string) WidgetOpt {
 	}
 }
 
+// This allows for non-focusable widgets (Containers) to report hover.
+func (o WidgetOptions) TrackHover(trackHover bool) WidgetOpt {
+	return func(w *Widget) {
+		w.TrackHover = trackHover
+	}
+}
+
 func (w *Widget) drawImageOptions(opts *ebiten.DrawImageOptions) {
 	opts.GeoM.Translate(float64(w.Rect.Min.X), float64(w.Rect.Min.Y))
 }
@@ -425,16 +498,35 @@ func (w *Widget) fireEvents() {
 	entered := inside && layer.ActiveFor(x, y, input.LayerEventTypeAny)
 	if entered != w.lastUpdateCursorEntered {
 		if entered {
+			off := p.Sub(w.Rect.Min)
 			w.CursorEnterEvent.Fire(&WidgetCursorEnterEventArgs{
-				Widget: w,
+				Widget:  w,
+				OffsetX: off.X,
+				OffsetY: off.Y,
 			})
 		} else {
+			off := p.Sub(w.Rect.Min)
 			w.CursorExitEvent.Fire(&WidgetCursorExitEventArgs{
-				Widget: w,
+				Widget:  w,
+				OffsetX: off.X,
+				OffsetY: off.Y,
 			})
 		}
 
 		w.lastUpdateCursorEntered = entered
+	}
+
+	if entered && w.lastUpdateCursorPosition != p {
+		off := p.Sub(w.Rect.Min)
+		w.CursorMoveEvent.Fire(&WidgetCursorMoveEventArgs{
+			Widget:  w,
+			OffsetX: off.X,
+			OffsetY: off.Y,
+			DiffX:   p.X - w.lastUpdateCursorPosition.X,
+			DiffY:   p.Y - w.lastUpdateCursorPosition.Y,
+		})
+
+		w.lastUpdateCursorPosition = p
 	}
 
 	if entered && len(w.CursorHovered) > 0 {
@@ -518,6 +610,10 @@ func (w *Widget) fireEvents() {
 			X:      scrollX,
 			Y:      scrollY,
 		})
+	}
+
+	if inside && w.TrackHover {
+		internalinput.InternalUIHovered = true
 	}
 }
 

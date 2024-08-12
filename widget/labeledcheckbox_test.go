@@ -21,13 +21,25 @@ func TestLabeledCheckbox_SetState_User(t *testing.T) {
 	is.Equal(l2.Checkbox().State(), WidgetUnchecked)
 }
 
+func TestLabeledCheckbox_Click(t *testing.T) {
+	is := is.New(t)
+
+	c := newLabeledCheckbox(t)
+
+	c.Click()
+	event.ExecuteDeferred()
+
+	is.Equal(c.Checkbox().State(), WidgetChecked)
+}
+
 func newLabeledCheckbox(t *testing.T, opts ...LabeledCheckboxOpt) *LabeledCheckbox {
 	t.Helper()
 
 	l := NewLabeledCheckbox(append(opts, []LabeledCheckboxOpt{
 		LabeledCheckboxOpts.CheckboxOpts(
 			CheckboxOpts.ButtonOpts(ButtonOpts.Image(&ButtonImage{
-				Idle: newNineSliceEmpty(t),
+				Idle:    newNineSliceEmpty(t),
+				Pressed: newNineSliceEmpty(t),
 			})),
 			CheckboxOpts.Image(&CheckboxGraphicImage{
 				Unchecked: &ButtonImageImage{

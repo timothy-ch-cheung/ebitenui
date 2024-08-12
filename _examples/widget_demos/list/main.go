@@ -10,6 +10,7 @@ import (
 	"github.com/ebitenui/ebitenui/widget"
 	"github.com/golang/freetype/truetype"
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/goregular"
 )
@@ -22,10 +23,12 @@ type ListEntry struct {
 
 // Game object used by ebiten
 type game struct {
-	ui *ebitenui.UI
+	ui   *ebitenui.UI
+	list *widget.List
 }
 
 func main() {
+	game := game{}
 	// load images for button states: idle, hover, and pressed
 	buttonImage, _ := loadButtonImage()
 
@@ -46,14 +49,12 @@ func main() {
 		widget.ContainerOpts.BackgroundImage(image.NewNineSliceColor(color.NRGBA{0x13, 0x1a, 0x22, 0xff})),
 
 		// the container will use an anchor layout to layout its single child widget
-		widget.ContainerOpts.Layout(widget.NewAnchorLayout(
-			widget.AnchorLayoutOpts.Padding(widget.NewInsetsSimple(50)),
-		)),
+		widget.ContainerOpts.Layout(widget.NewAnchorLayout()),
 	)
 
 	// Construct a list. This is one of the more complicated widgets to use since
 	// it is composed of multiple widget types
-	list := widget.NewList(
+	game.list = widget.NewList(
 		// Set how wide the list should be
 		widget.ListOpts.ContainerOpts(widget.ContainerOpts.WidgetOpts(
 			widget.WidgetOpts.MinSize(150, 0),
@@ -61,6 +62,7 @@ func main() {
 				HorizontalPosition: widget.AnchorLayoutPositionCenter,
 				VerticalPosition:   widget.AnchorLayoutPositionEnd,
 				StretchVertical:    true,
+				Padding:            widget.NewInsetsSimple(50),
 			}),
 		)),
 		// Set the entries in the list
@@ -88,14 +90,16 @@ func main() {
 		widget.ListOpts.EntryFontFace(face),
 		// Set the colors for the list
 		widget.ListOpts.EntryColor(&widget.ListEntryColor{
-			Selected:                   color.NRGBA{0, 255, 0, 255},                 // Foreground color for the unfocused selected entry
-			Unselected:                 color.NRGBA{254, 255, 255, 255},             // Foreground color for the unfocused unselected entry
+			Selected:                   color.NRGBA{R: 0, G: 255, B: 0, A: 255},     // Foreground color for the unfocused selected entry
+			Unselected:                 color.NRGBA{R: 254, G: 255, B: 255, A: 255}, // Foreground color for the unfocused unselected entry
 			SelectedBackground:         color.NRGBA{R: 130, G: 130, B: 200, A: 255}, // Background color for the unfocused selected entry
+			SelectingBackground:        color.NRGBA{R: 130, G: 130, B: 130, A: 255}, // Background color for the unfocused being selected entry
+			SelectingFocusedBackground: color.NRGBA{R: 130, G: 140, B: 170, A: 255}, // Background color for the focused being selected entry
 			SelectedFocusedBackground:  color.NRGBA{R: 130, G: 130, B: 170, A: 255}, // Background color for the focused selected entry
 			FocusedBackground:          color.NRGBA{R: 170, G: 170, B: 180, A: 255}, // Background color for the focused unselected entry
-			DisabledUnselected:         color.NRGBA{100, 100, 100, 255},             // Foreground color for the disabled unselected entry
-			DisabledSelected:           color.NRGBA{100, 100, 100, 255},             // Foreground color for the disabled selected entry
-			DisabledSelectedBackground: color.NRGBA{100, 100, 100, 255},             // Background color for the disabled selected entry
+			DisabledUnselected:         color.NRGBA{R: 100, G: 100, B: 100, A: 255}, // Foreground color for the disabled unselected entry
+			DisabledSelected:           color.NRGBA{R: 100, G: 100, B: 100, A: 255}, // Foreground color for the disabled selected entry
+			DisabledSelectedBackground: color.NRGBA{R: 100, G: 100, B: 100, A: 255}, // Background color for the disabled selected entry
 		}),
 		// This required function returns the string displayed in the list
 		widget.ListOpts.EntryLabelFunc(func(e interface{}) string {
@@ -110,16 +114,22 @@ func main() {
 			entry := args.Entry.(ListEntry)
 			fmt.Println("Entry Selected: ", entry)
 		}),
+		// This option will select the entry as it is focused
+		// widget.ListOpts.SelectFocus(),
+
+		// This option will disable default keys (up and down)
+		//widget.ListOpts.DisableDefaultKeys(true),
 	)
 
 	// Add list to the root container
-	rootContainer.AddChild(list)
+	rootContainer.AddChild(game.list)
 
 	buttonsContainer := widget.NewContainer(
 		widget.ContainerOpts.WidgetOpts(
 			widget.WidgetOpts.LayoutData(widget.AnchorLayoutData{
 				HorizontalPosition: widget.AnchorLayoutPositionCenter,
-				VerticalPosition:   widget.AnchorLayoutPositionEnd,
+				VerticalPosition:   widget.AnchorLayoutPositionStart,
+				Padding:            widget.NewInsetsSimple(5),
 			}),
 		),
 		widget.ContainerOpts.Layout(widget.NewGridLayout(
@@ -152,8 +162,8 @@ func main() {
 			entryToAdd := ListEntry{id, fmt.Sprintf("Entry %d", id)}
 			id++
 
-			list.AddEntry(entryToAdd)
-			list.SetSelectedEntry(entryToAdd)
+			game.list.AddEntry(entryToAdd)
+			game.list.SetSelectedEntry(entryToAdd)
 		}),
 	)
 	buttonsContainer.AddChild(buttonAdd)
@@ -179,7 +189,7 @@ func main() {
 
 		// add a handler that reacts to clicking the button
 		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
-			list.RemoveEntry(list.SelectedEntry())
+			game.list.RemoveEntry(game.list.SelectedEntry())
 		}),
 	)
 	buttonsContainer.AddChild(buttonRemove)
@@ -206,7 +216,7 @@ func main() {
 		// add a handler that reacts to clicking the button
 		widget.ButtonOpts.ClickedHandler(func(args *widget.ButtonClickedEventArgs) {
 			entries := make([]any, 0)
-			list.SetEntries(entries)
+			game.list.SetEntries(entries)
 		}),
 	)
 	buttonsContainer.AddChild(buttonClean)
@@ -222,9 +232,7 @@ func main() {
 	ebiten.SetWindowSize(400, 400)
 	ebiten.SetWindowTitle("Ebiten UI - List")
 
-	game := game{
-		ui: &ui,
-	}
+	game.ui = &ui
 
 	// run Ebiten main loop
 	err := ebiten.RunGame(&game)
@@ -242,6 +250,18 @@ func (g *game) Layout(outsideWidth int, outsideHeight int) (int, int) {
 func (g *game) Update() error {
 	// update the UI
 	g.ui.Update()
+
+	if list, ok := g.ui.GetFocusedWidget().(*widget.List); ok {
+		//Test that you can call Click on the focused widget.
+		if inpututil.IsKeyJustPressed(ebiten.KeyW) {
+			list.FocusPrevious()
+		} else if inpututil.IsKeyJustPressed(ebiten.KeyS) {
+			list.FocusNext()
+		} else if inpututil.IsKeyJustPressed(ebiten.KeyB) {
+			list.SelectFocused()
+		}
+	}
+
 	return nil
 }
 

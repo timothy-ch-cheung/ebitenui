@@ -18,6 +18,47 @@ func TestCheckbox_State_Initial(t *testing.T) {
 	is.Equal(c.State(), WidgetUnchecked)
 }
 
+func TestCheckbox_State_SetInitial(t *testing.T) {
+	is := is.New(t)
+
+	c := newCheckbox(t,
+		CheckboxOpts.InitialState(WidgetChecked),
+		CheckboxOpts.StateChangedHandler(func(_ *CheckboxChangedEventArgs) {
+			is.Fail() // event fired without previous action
+		}))
+
+	is.Equal(c.State(), WidgetChecked)
+}
+
+func TestCheckbox_State_SetInitialTri(t *testing.T) {
+	is := is.New(t)
+
+	c := newCheckbox(t,
+		CheckboxOpts.TriState(),
+		CheckboxOpts.InitialState(WidgetGreyed),
+		CheckboxOpts.StateChangedHandler(func(_ *CheckboxChangedEventArgs) {
+			is.Fail() // event fired without previous action
+		}))
+
+	is.Equal(c.State(), WidgetGreyed)
+}
+
+func TestCheckbox_State_SetInitialPanic(t *testing.T) {
+	is := is.New(t)
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("The code did not panic")
+		}
+	}()
+
+	newCheckbox(t,
+		CheckboxOpts.InitialState(WidgetGreyed),
+		CheckboxOpts.StateChangedHandler(func(_ *CheckboxChangedEventArgs) {
+			is.Fail() // event fired without previous action
+		}))
+}
+
 func TestCheckbox_ChangedEvent_User(t *testing.T) {
 	is := is.New(t)
 
@@ -29,6 +70,23 @@ func TestCheckbox_ChangedEvent_User(t *testing.T) {
 		}))
 
 	leftMouseButtonClick(c, t)
+
+	is.Equal(eventArgs.State, WidgetChecked)
+	is.Equal(c.State(), WidgetChecked)
+}
+
+func TestCheckbox_Click(t *testing.T) {
+	is := is.New(t)
+
+	var eventArgs *CheckboxChangedEventArgs
+
+	c := newCheckbox(t,
+		CheckboxOpts.StateChangedHandler(func(args *CheckboxChangedEventArgs) {
+			eventArgs = args
+		}))
+
+	c.Click()
+	event.ExecuteDeferred()
 
 	is.Equal(eventArgs.State, WidgetChecked)
 	is.Equal(c.State(), WidgetChecked)
@@ -85,7 +143,8 @@ func newCheckbox(t *testing.T, opts ...CheckboxOpt) *Checkbox {
 
 	c := NewCheckbox(append(opts, []CheckboxOpt{
 		CheckboxOpts.ButtonOpts(ButtonOpts.Image(&ButtonImage{
-			Idle: newNineSliceEmpty(t),
+			Idle:    newNineSliceEmpty(t),
+			Pressed: newNineSliceEmpty(t),
 		})),
 
 		CheckboxOpts.Image(&CheckboxGraphicImage{
