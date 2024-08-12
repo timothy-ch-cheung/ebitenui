@@ -122,7 +122,7 @@ func (r *RadioGroup) SetActive(a RadioGroupElement) {
 }
 
 func (r *RadioGroup) AddElement(a RadioGroupElement) {
-	a.getStateChangedEvent().AddHandler(
+	a.GetStateChangedEvent().AddHandler(
 		func(args interface{}) {
 			if !r.listen {
 				return
