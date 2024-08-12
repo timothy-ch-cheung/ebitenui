@@ -65,7 +65,33 @@ func NewTabBook(opts ...TabBookOpt) *TabBook {
 		o(t)
 	}
 
+	t.validate()
+
 	return t
+}
+
+func (t *TabBook) validate() {
+	if len(t.tabs) == 0 {
+		panic("TabBook: At least one tab is required.")
+	}
+	if t.buttonColor == nil {
+		panic("TabBook: TabButtonText Color is required.")
+	}
+	if t.buttonColor.Idle == nil {
+		panic("TabBook: TabButtonText Color.Idle is required.")
+	}
+	if t.buttonFace == nil {
+		panic("TabBook: TabButtonText Font Face is required.")
+	}
+	if t.buttonImages == nil {
+		panic("TabBook: TabButtonImage is required.")
+	}
+	if t.buttonImages.Idle == nil {
+		panic("TabBook: TabButtonImage.Idle is required.")
+	}
+	if t.buttonImages.Pressed == nil {
+		panic("TabBook: TabButtonImage.Pressed is required.")
+	}
 }
 
 func NewTabBookTab(label string, opts ...ContainerOpt) *TabBookTab {
@@ -264,30 +290,33 @@ func (t *TabBook) SetTab(tab *TabBookTab) {
 	t.init.Do()
 
 	if tab != t.tab {
-		previousTab := t.tab
+		btn := t.GetTabButton(tab)
+		if btn != nil {
+			previousTab := t.tab
 
-		t.tab = tab
+			t.tab = tab
 
-		t.flipBook.SetPage(tab)
+			t.flipBook.SetPage(tab)
 
-		for bt, b := range t.tabToButton {
-			state := WidgetUnchecked
-			if bt == tab {
-				state = WidgetChecked
-			}
-			b.SetState(state)
+			btn.SetState(WidgetChecked)
+
+			t.TabSelectedEvent.Fire(&TabBookTabSelectedEventArgs{
+				TabBook:     t,
+				Tab:         tab,
+				PreviousTab: previousTab,
+			})
 		}
-
-		t.TabSelectedEvent.Fire(&TabBookTabSelectedEventArgs{
-			TabBook:     t,
-			Tab:         tab,
-			PreviousTab: previousTab,
-		})
 	}
-
 }
 
 // Return the currently selected tab
 func (t *TabBook) Tab() *TabBookTab {
 	return t.tab
+}
+
+// Return the button associated with the provided TabBookTab if not exists else nil
+func (t *TabBook) GetTabButton(tab *TabBookTab) *Button {
+	t.init.Do()
+
+	return t.tabToButton[tab]
 }

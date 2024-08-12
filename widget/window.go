@@ -28,9 +28,16 @@ type WindowChangedEventArgs struct {
 
 type WindowChangedHandlerFunc func(args *WindowChangedEventArgs)
 
+type WindowClosedEventArgs struct {
+	Window *Window
+}
+
+type WindowClosedHandlerFunc func(args *WindowClosedEventArgs)
+
 type Window struct {
 	ResizeEvent *event.Event
 	MoveEvent   *event.Event
+	ClosedEvent *event.Event
 
 	Modal      bool
 	Contents   *Container
@@ -69,88 +76,24 @@ func NewWindow(opts ...WindowOpt) *Window {
 	w := &Window{
 		MoveEvent:   &event.Event{},
 		ResizeEvent: &event.Event{},
+		ClosedEvent: &event.Event{},
 		init:        &MultiOnce{},
 	}
-
+	w.init.Append(w.createWidget)
 	for _, o := range opts {
 		o(w)
 	}
 
-	if w.TitleBar != nil {
-		w.container = NewContainer(ContainerOpts.Layout(NewGridLayout(
-			GridLayoutOpts.Columns(1),
-			GridLayoutOpts.Stretch([]bool{true}, []bool{false, true}),
-		)))
-		w.TitleBar.GetWidget().LayoutData = GridLayoutData{MaxHeight: w.titleBarHeight}
-		w.TitleBar.GetWidget().MinHeight = w.titleBarHeight
-		if w.Draggable {
-			w.TitleBar.GetWidget().MouseButtonPressedEvent.AddHandler(func(a any) {
-				args := a.(*WidgetMouseButtonPressedEventArgs)
-				if args.Button == ebiten.MouseButtonLeft {
-					x, y := input.CursorPosition()
-					w.startingPoint = image.Point{x, y}
-					w.dragging = true
-				}
-			})
-			w.TitleBar.GetWidget().MouseButtonReleasedEvent.AddHandler(func(a any) {
-				args := a.(*WidgetMouseButtonReleasedEventArgs)
-				if w.dragging && args.Button == ebiten.MouseButtonLeft {
-					w.dragging = false
-					w.MoveEvent.Fire(&WindowChangedEventArgs{
-						Window: w,
-						Rect:   w.container.GetWidget().Rect,
-					})
-				}
-			})
-		}
-		w.container.AddChild(w.TitleBar)
-		w.container.AddChild(w.Contents)
-	} else {
-		w.container = NewContainer(ContainerOpts.Layout(NewGridLayout(
-			GridLayoutOpts.Columns(1),
-			GridLayoutOpts.Stretch([]bool{true}, []bool{true}),
-		)))
-
-		w.container.AddChild(w.Contents)
-	}
-
-	if w.Resizeable {
-		w.Contents.GetWidget().MouseButtonPressedEvent.AddHandler(func(a any) {
-			args := a.(*WidgetMouseButtonPressedEventArgs)
-			if args.Button == ebiten.MouseButtonLeft {
-				x, y := input.CursorPosition()
-				w.startingPoint = image.Point{x, y}
-				w.originalSize.X = w.container.GetWidget().Rect.Max.X
-				w.originalSize.Y = w.container.GetWidget().Rect.Max.Y
-				w.resizing = true
-			}
-		})
-		w.Contents.GetWidget().MouseButtonReleasedEvent.AddHandler(func(a any) {
-			args := a.(*WidgetMouseButtonReleasedEventArgs)
-			if w.resizing && args.Button == ebiten.MouseButtonLeft {
-				w.resizing = false
-				w.ResizeEvent.Fire(&WindowChangedEventArgs{
-					Window: w,
-					Rect:   w.container.GetWidget().Rect,
-				})
-			}
-		})
-	}
-
-	if w.closeMode == CLICK || w.closeMode == CLICK_OUT {
-		w.container.GetWidget().CustomData = "Window"
-		w.container.GetWidget().MouseButtonReleasedEvent.AddHandler(func(args interface{}) {
-			a := args.(*WidgetMouseButtonReleasedEventArgs)
-			if w.closeMode == CLICK || (w.closeMode == CLICK_OUT && !a.Inside) {
-				if w.closeFunc != nil {
-					w.closeFunc()
-				}
-			}
-		})
-	}
+	w.validate()
 
 	w.init.Do()
 	return w
+}
+
+func (w *Window) validate() {
+	if w.Contents == nil {
+		panic("Window: Contents is required.")
+	}
 }
 
 // This is the container with the body of this window
@@ -229,6 +172,21 @@ func (o WindowOptions) ResizeHandler(f WindowChangedHandlerFunc) WindowOpt {
 	}
 }
 
+// This handler is triggered when window is closed.
+// The window can be closed by either calling [Window.Close] or
+// by invoking an [UI.AddWindow] returned close function.
+//
+// This handler is called after the window is closed.
+// The provided Window object is still accessible, but the window
+// is already removed from UI.
+func (o WindowOptions) ClosedHandler(f WindowClosedHandlerFunc) WindowOpt {
+	return func(w *Window) {
+		w.ClosedEvent.AddHandler(func(args interface{}) {
+			f(args.(*WindowClosedEventArgs))
+		})
+	}
+}
+
 // This option sets the size and location of the window.
 // This method will account for specified MinSize and MaxSize values.
 func (o WindowOptions) Location(rect image.Rectangle) WindowOpt {
@@ -288,7 +246,17 @@ func (w *Window) GetContainer() *Container {
 
 // Typically used internally.
 func (w *Window) SetCloseFunction(close RemoveWindowFunc) {
-	w.closeFunc = close
+	w.closeFunc = func() {
+		close()
+		w.ClosedEvent.Fire(&WindowClosedEventArgs{
+			Window: w,
+		})
+	}
+}
+
+// Typically used internally.
+func (w *Window) GetCloseFunction() RemoveWindowFunc {
+	return w.closeFunc
 }
 
 // Typically used internally
@@ -301,7 +269,7 @@ func (w *Window) SetupInputLayer(def input.DeferredSetupInputLayerFunc) {
 	w.container.GetWidget().ElevateToNewInputLayer(&input.Layer{
 		DebugLabel: "window",
 		EventTypes: input.LayerEventTypeAll,
-		BlockLower: true,
+		BlockLower: !w.Ephemeral,
 		FullScreen: w.Modal,
 		RectFunc: func() image.Rectangle {
 			return w.container.GetWidget().Rect
@@ -359,4 +327,85 @@ func (w *Window) Render(screen *ebiten.Image, def DeferredRenderFunc) {
 		}
 	}
 	w.container.Render(screen, def)
+}
+
+func (w *Window) createWidget() {
+	if w.TitleBar != nil {
+		w.container = NewContainer(
+			ContainerOpts.Layout(NewGridLayout(
+				GridLayoutOpts.Columns(1),
+				GridLayoutOpts.Stretch([]bool{true}, []bool{false, true}),
+			)),
+			ContainerOpts.WidgetOpts(WidgetOpts.TrackHover(true)),
+		)
+		w.TitleBar.GetWidget().LayoutData = GridLayoutData{MaxHeight: w.titleBarHeight}
+		w.TitleBar.GetWidget().MinHeight = w.titleBarHeight
+		if w.Draggable {
+			w.TitleBar.GetWidget().MouseButtonPressedEvent.AddHandler(func(a any) {
+				args := a.(*WidgetMouseButtonPressedEventArgs)
+				if args.Button == ebiten.MouseButtonLeft {
+					x, y := input.CursorPosition()
+					w.startingPoint = image.Point{x, y}
+					w.dragging = true
+				}
+			})
+			w.TitleBar.GetWidget().MouseButtonReleasedEvent.AddHandler(func(a any) {
+				args := a.(*WidgetMouseButtonReleasedEventArgs)
+				if w.dragging && args.Button == ebiten.MouseButtonLeft {
+					w.dragging = false
+					w.MoveEvent.Fire(&WindowChangedEventArgs{
+						Window: w,
+						Rect:   w.container.GetWidget().Rect,
+					})
+				}
+			})
+		}
+		w.container.AddChild(w.TitleBar)
+		w.container.AddChild(w.Contents)
+	} else {
+		w.container = NewContainer(
+			ContainerOpts.Layout(NewGridLayout(
+				GridLayoutOpts.Columns(1),
+				GridLayoutOpts.Stretch([]bool{true}, []bool{true}),
+			)),
+			ContainerOpts.WidgetOpts(WidgetOpts.TrackHover(true)),
+		)
+
+		w.container.AddChild(w.Contents)
+	}
+
+	if w.Resizeable {
+		w.Contents.GetWidget().MouseButtonPressedEvent.AddHandler(func(a any) {
+			args := a.(*WidgetMouseButtonPressedEventArgs)
+			if args.Button == ebiten.MouseButtonLeft {
+				x, y := input.CursorPosition()
+				w.startingPoint = image.Point{x, y}
+				w.originalSize.X = w.container.GetWidget().Rect.Max.X
+				w.originalSize.Y = w.container.GetWidget().Rect.Max.Y
+				w.resizing = true
+			}
+		})
+		w.Contents.GetWidget().MouseButtonReleasedEvent.AddHandler(func(a any) {
+			args := a.(*WidgetMouseButtonReleasedEventArgs)
+			if w.resizing && args.Button == ebiten.MouseButtonLeft {
+				w.resizing = false
+				w.ResizeEvent.Fire(&WindowChangedEventArgs{
+					Window: w,
+					Rect:   w.container.GetWidget().Rect,
+				})
+			}
+		})
+	}
+
+	if w.closeMode == CLICK || w.closeMode == CLICK_OUT {
+		w.container.GetWidget().CustomData = "Window"
+		w.container.GetWidget().MouseButtonReleasedEvent.AddHandler(func(args interface{}) {
+			a := args.(*WidgetMouseButtonReleasedEventArgs)
+			if w.closeMode == CLICK || (w.closeMode == CLICK_OUT && !a.Inside) {
+				if w.closeFunc != nil {
+					w.closeFunc()
+				}
+			}
+		})
+	}
 }
